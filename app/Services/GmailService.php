@@ -197,6 +197,56 @@ class GmailService
     }
 
     /**
+     * Fetch decoded plain-text bodies for multiple message IDs in a single Batch API call.
+     *
+     * @param  array<int, string>  $messageIds
+     * @return array<string, string>
+     */
+    public function getBodiesBatch(GmailAccount $account, array $messageIds, int $maxLength = 25000): array
+    {
+        $ids = array_values(array_unique(array_filter($messageIds)));
+        if (empty($ids)) {
+            return [];
+        }
+
+        $gmail = $this->getGmailService($account);
+        $client = $gmail->getClient();
+        $bodies = [];
+
+        foreach (array_chunk($ids, 25) as $chunk) {
+            $client->setUseBatch(true);
+            $batch = $gmail->createBatch();
+
+            foreach ($chunk as $id) {
+                $batch->add(
+                    $gmail->users_messages->get('me', $id, ['format' => 'full']),
+                    $id
+                );
+            }
+
+            $batchResults = $batch->execute();
+            $client->setUseBatch(false);
+
+            foreach ($chunk as $id) {
+                $msg = $batchResults['response-' . $id] ?? null;
+                if (!$msg instanceof Message) {
+                    continue;
+                }
+
+                $extracted = $this->extractBodies($msg->getPayload());
+                $text = $extracted['plain'] !== null && trim($extracted['plain']) !== ''
+                    ? $extracted['plain']
+                    : ($extracted['html'] !== null ? $this->htmlToText($extracted['html']) : (string) $msg->getSnippet());
+
+                $text = trim(preg_replace('/\s+/u', ' ', $text) ?? $text);
+                $bodies[$id] = mb_substr($text, 0, $maxLength);
+            }
+        }
+
+        return $bodies;
+    }
+
+    /**
      * Invalidate cached inbox lists for this account after mutations or manual refresh.
      */
     public function clearListCache(GmailAccount $account): void

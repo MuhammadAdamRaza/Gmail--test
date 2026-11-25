@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\GmailAccount;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -9,10 +10,10 @@ use Throwable;
 
 class AiKeywordService
 {
-    private const CACHE_PREFIX = 'gmail:kw:v3:';
+    private const CACHE_PREFIX = 'gmail:kw:v7:';
 
     /**
-     * Get cached 4 keywords for a single email if already extracted.
+     * Get cached keywords for a single email if already extracted.
      *
      * @return array<int, string>|null
      */
@@ -24,12 +25,12 @@ class AiKeywordService
     }
 
     /**
-     * Extract 4 concise keywords for a batch of emails in a single OpenRouter API call.
+     * Extract 2-6 concise keywords for a batch of emails using their full body content.
      *
      * @param  array<int, array{id: string, from?: string, subject?: string, snippet?: string}>  $emails
      * @return array<string, array<int, string>>
      */
-    public function extractBatch(array $emails): array
+    public function extractBatch(array $emails, ?GmailAccount $account = null, ?GmailService $gmailService = null): array
     {
         $results = [];
         $uncached = [];
@@ -57,6 +58,33 @@ class AiKeywordService
             return $results;
         }
 
+        // Fetch full email bodies in one Batch API call for uncached messages
+        $fullBodies = [];
+        if ($account && $gmailService) {
+            try {
+                $fullBodies = $gmailService->getBodiesBatch(
+                    $account,
+                    array_column($uncached, 'id'),
+                    25000
+                );
+            } catch (Throwable $e) {
+                Log::warning('Failed to fetch full bodies for AI keywords, falling back to snippet', [
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        $payloadItems = array_map(function (array $item) use ($fullBodies) {
+            $body = $fullBodies[$item['id']] ?? $item['snippet'];
+
+            return [
+                'id' => $item['id'],
+                'from' => $item['from'],
+                'subject' => $item['subject'],
+                'body' => $body,
+            ];
+        }, $uncached);
+
         $apiKey = (string) config('services.openrouter.api_key');
         $apiUrl = (string) config('services.openrouter.api_url', 'https://openrouter.ai/api/v1/chat/completions');
         $model = (string) config('services.openrouter.model', 'deepseek/deepseek-chat');
@@ -66,7 +94,7 @@ class AiKeywordService
         }
 
         // Process in small chunks of 8 so each OpenRouter call is fast and never times out
-        foreach (array_chunk($uncached, 8) as $chunk) {
+        foreach (array_chunk($payloadItems, 8) as $chunk) {
             try {
                 $promptPayload = json_encode($chunk, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
@@ -78,15 +106,15 @@ class AiKeywordService
                 ])->timeout(30)->post($apiUrl, [
                     'model' => $model,
                     'temperature' => 0.1,
-                    'max_tokens' => 600,
+                    'max_tokens' => 2000,
                     'messages' => [
                         [
                             'role' => 'system',
-                            'content' => 'Extract 2 to 6 main, high-signal keywords (1-3 words each) based on how detailed each email is: 2-3 for short/simple emails, 4 for normal emails, and 5-6 for detailed/multi-topic emails so the user understands the email without opening it. Do NOT repeat generic filler words. Return ONLY valid JSON mapping each "id" to an array of 2-6 strings. No markdown.',
+                            'content' => 'Read each email\'s ENTIRE body from start to finish and extract all main keywords (1-4 words each). IMPORTANT: If an email lists multiple companies, jobs, products, or items (for example, 8 different companies hiring), you MUST include EVERY single company/item name and its main role/topic — do NOT skip companies or stop at 5-6 keywords. For short emails, give 2-3 keywords. ONLY skip email footer/UI boilerplate ("Unsubscribe", "Privacy Policy", "Manage settings", "Create job alerts", "Edit job alert", "Trademarks", "Copyright", "View in browser", "Help") and generic filler ("Job alert", "Email", "Notification"). Return ONLY valid JSON mapping each "id" to an array of strings. No markdown.',
                         ],
                         [
                             'role' => 'user',
-                            'content' => 'Extract main keywords for each email in this JSON list: ' . $promptPayload,
+                            'content' => 'Extract all relevant keywords from the full body of each email in this JSON list: ' . $promptPayload,
                         ],
                     ],
                 ]);
@@ -106,10 +134,7 @@ class AiKeywordService
                     $id = $item['id'];
                     $rawKeywords = $parsed[$id] ?? null;
                     if (is_array($rawKeywords) && count($rawKeywords) > 0) {
-                        $clean = array_values(array_slice(array_filter(array_map(
-                            fn ($k) => trim((string) $k),
-                            $rawKeywords
-                        )), 0, 6));
+                        $clean = $this->filterKeywords($rawKeywords);
 
                         if (!empty($clean)) {
                             Cache::put(self::CACHE_PREFIX . $id, $clean, now()->addDays(30));
@@ -126,6 +151,54 @@ class AiKeywordService
     }
 
     /**
+     * Remove boilerplate/footer noise and case-insensitive duplicates.
+     *
+     * @param  array<int, mixed>  $rawKeywords
+     * @return array<int, string>
+     */
+    private function filterKeywords(array $rawKeywords): array
+    {
+        $blocked = [
+            'unsubscribe',
+            'privacy policy',
+            'manage settings',
+            'create job alerts',
+            'create job alert',
+            'edit job alert',
+            'edit job alerts',
+            'trademarks',
+            'copyright',
+            'terms of service',
+            'terms and conditions',
+            'view in browser',
+            'job alert',
+            'job alerts',
+            'email preferences',
+            'help center',
+        ];
+
+        $seen = [];
+        $clean = [];
+
+        foreach ($rawKeywords as $kw) {
+            $text = trim((string) $kw);
+            if ($text === '') {
+                continue;
+            }
+
+            $lower = mb_strtolower($text);
+            if (in_array($lower, $blocked, true) || isset($seen[$lower])) {
+                continue;
+            }
+
+            $seen[$lower] = true;
+            $clean[] = $text;
+        }
+
+        return $clean;
+    }
+
+    /**
      * @return array<string, mixed>
      */
     private function parseJsonResponse(string $content): array
@@ -139,7 +212,6 @@ class AiKeywordService
             return $decoded;
         }
 
-        // Fallback: extract first JSON object if surrounding text exists
         if (preg_match('/\{.*\}/s', $trimmed, $matches)) {
             $decoded = json_decode($matches[0], true);
             if (is_array($decoded)) {

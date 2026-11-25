@@ -184,9 +184,9 @@ class GmailController extends Controller
     }
 
     /**
-     * Extract 4 AI keywords for uncached emails in one batch OpenRouter call.
+     * Extract 2-6 AI keywords for uncached emails using their full bodies in one batch call.
      */
-    public function keywords(Request $request, AiKeywordService $aiKeywordService): JsonResponse
+    public function keywords(Request $request, GmailService $gmailService, AiKeywordService $aiKeywordService): JsonResponse
     {
         $validated = $request->validate([
             'emails' => ['required', 'array', 'max:100'],
@@ -196,7 +196,8 @@ class GmailController extends Controller
             'emails.*.snippet' => ['nullable', 'string', 'max:1000'],
         ]);
 
-        $keywords = $aiKeywordService->extractBatch($validated['emails']);
+        $account = $this->resolveAccount();
+        $keywords = $aiKeywordService->extractBatch($validated['emails'], $account, $gmailService);
 
         return response()->json(['keywords' => $keywords]);
     }

@@ -23,7 +23,17 @@
                 @endif
             </div>
 
-            <div class="flex items-center gap-2.5">
+            <div class="flex items-center gap-2.5 flex-wrap">
+                <button
+                    type="button"
+                    id="extractAllKwBtn"
+                    onclick="extractMissingKeywords()"
+                    class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-50 border border-indigo-200 text-[11px] font-semibold text-indigo-700 cursor-pointer hover:bg-indigo-100 transition"
+                    title="Extract AI keywords for all emails on this page"
+                >
+                    <span>✨ AI Keywords (All)</span>
+                </button>
+
                 <button
                     type="button"
                     id="autoSyncBadge"
@@ -126,7 +136,6 @@
                         const html = await res.text();
                         if (html.trim() !== '' && container) {
                             container.innerHTML = html;
-                            extractMissingKeywords();
                         }
                     }
                 } catch (e) {
@@ -137,13 +146,76 @@
                 }
             }
 
-            async function extractMissingKeywords() {
+            function renderKeywordPills(el, kws) {
+                if (Array.isArray(kws) && kws.length > 0) {
+                    el.innerHTML = '';
+                    kws.forEach(kw => {
+                        const span = document.createElement('span');
+                        span.className = 'inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium bg-indigo-50 text-indigo-700 border border-indigo-200/70';
+                        span.textContent = kw;
+                        el.appendChild(span);
+                    });
+                    el.dataset.loaded = '1';
+                }
+            }
+
+            window.extractSingleKeyword = async function (btn) {
+                const el = btn.closest('.ai-kw-slot');
+                if (!el || el.dataset.loaded === '1') return;
+
+                btn.disabled = true;
+                btn.textContent = 'Extracting...';
+
+                try {
+                    const res = await fetch(keywordsUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json',
+                            'X-CSRF-TOKEN': csrfToken,
+                            'X-Requested-With': 'XMLHttpRequest',
+                        },
+                        body: JSON.stringify({
+                            emails: [{
+                                id: el.dataset.msgId,
+                                from: el.dataset.from || '',
+                                subject: el.dataset.subject || '',
+                                snippet: el.dataset.snippet || '',
+                            }]
+                        }),
+                    });
+
+                    if (res.ok) {
+                        const data = await res.json();
+                        const kws = (data.keywords || {})[el.dataset.msgId];
+                        if (Array.isArray(kws) && kws.length > 0) {
+                            renderKeywordPills(el, kws);
+                            return;
+                        }
+                    }
+                } catch (e) {}
+
+                btn.disabled = false;
+                btn.textContent = '✨ AI Keywords';
+            };
+
+            window.extractMissingKeywords = async function () {
                 const slots = Array.from(document.querySelectorAll('.ai-kw-slot[data-loaded="0"]'));
                 if (slots.length === 0) return;
 
-                // Process in batches of 8 so keywords appear progressively and fast
+                const allBtn = document.getElementById('extractAllKwBtn');
+                if (allBtn) {
+                    allBtn.disabled = true;
+                    allBtn.textContent = 'Extracting...';
+                }
+
                 for (let i = 0; i < slots.length; i += 8) {
                     const batchSlots = slots.slice(i, i + 8);
+                    batchSlots.forEach(el => {
+                        const b = el.querySelector('button');
+                        if (b) { b.disabled = true; b.textContent = 'Extracting...'; }
+                    });
+
                     const payload = batchSlots.map(el => ({
                         id: el.dataset.msgId,
                         from: el.dataset.from || '',
@@ -170,29 +242,27 @@
                         batchSlots.forEach(el => {
                             const kws = map[el.dataset.msgId];
                             if (Array.isArray(kws) && kws.length > 0) {
-                                el.innerHTML = '';
-                                kws.slice(0, 6).forEach(kw => {
-                                    const span = document.createElement('span');
-                                    span.className = 'inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium bg-indigo-50 text-indigo-700 border border-indigo-200/70';
-                                    span.textContent = kw;
-                                    el.appendChild(span);
-                                });
-                                el.dataset.loaded = '1';
+                                renderKeywordPills(el, kws);
                             } else {
-                                el.innerHTML = '';
-                                el.dataset.loaded = '1';
+                                const b = el.querySelector('button');
+                                if (b) { b.disabled = false; b.textContent = '✨ AI Keywords'; }
                             }
                         });
                     } catch (e) {
                         batchSlots.forEach(el => {
-                            el.innerHTML = '';
+                            const b = el.querySelector('button');
+                            if (b) { b.disabled = false; b.textContent = '✨ AI Keywords'; }
                         });
                     }
                 }
-            }
+
+                if (allBtn) {
+                    allBtn.disabled = false;
+                    allBtn.textContent = '✨ AI Keywords (All)';
+                }
+            };
 
             updateBadge();
-            extractMissingKeywords();
             setInterval(runAutoSync, 25000);
         })();
     </script>

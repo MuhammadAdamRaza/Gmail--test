@@ -68,7 +68,7 @@
                         </span>
                     </div>
 
-                    <!-- AI 4 Keywords -->
+                    <!-- AI Keywords (On-Demand to save tokens) -->
                     <div
                         class="ai-kw-slot mt-1.5 flex flex-wrap items-center gap-1.5"
                         data-msg-id="{{ $msg['id'] }}"
@@ -84,9 +84,13 @@
                                 </span>
                             @endforeach
                         @else
-                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium bg-slate-100 text-slate-400 animate-pulse">
-                                AI keywords...
-                            </span>
+                            <button
+                                type="button"
+                                onclick="event.preventDefault(); event.stopPropagation(); extractSingleKeyword(this);"
+                                class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-slate-100 hover:bg-indigo-50 text-slate-600 hover:text-indigo-700 border border-slate-200/80 hover:border-indigo-200 transition cursor-pointer"
+                            >
+                                <span>✨ AI Keywords</span>
+                            </button>
                         @endif
                     </div>
                 </a>
