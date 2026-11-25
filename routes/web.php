@@ -12,6 +12,7 @@ Route::get('/gmail/message/{id}', [GmailController::class, 'show'])->name('gmail
 Route::get('/gmail/message/{id}/attachment/{attachmentId}', [GmailController::class, 'attachment'])->name('gmail.attachment');
 
 Route::post('/gmail/compose', [GmailController::class, 'compose'])->name('gmail.compose');
+Route::post('/gmail/keywords', [GmailController::class, 'keywords'])->name('gmail.keywords');
 Route::post('/gmail/message/{id}/reply', [GmailController::class, 'reply'])->name('gmail.reply');
 Route::post('/gmail/message/{id}/forward', [GmailController::class, 'forward'])->name('gmail.forward');
 Route::post('/gmail/message/{id}/star', [GmailController::class, 'toggleStar'])->name('gmail.star');

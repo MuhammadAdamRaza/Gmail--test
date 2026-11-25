@@ -1,6 +1,6 @@
-# Gmail Workspace (Laravel + Gmail API)
+# Gmail Workspace (Laravel + Gmail API + OpenRouter AI)
 
-A full-featured, fast Gmail client built with **Laravel 13**, **MySQL**, **Laravel Socialite**, and the **Google API PHP Client (`google/apiclient`)**. Connect your Google account via OAuth 2.0 to browse folders, search emails, read full conversation threads (Rich HTML & Plain Text), download attachments, compose new emails with CC/BCC/attachments, and send threaded replies.
+A full-featured, fast Gmail client built with **Laravel 13**, **MySQL**, **Laravel Socialite**, **Google API PHP Client (`google/apiclient`)**, and **OpenRouter AI (`deepseek/deepseek-chat`)**. Connect your Google account via OAuth 2.0 to browse folders, auto-sync new emails in the background, view AI-extracted keywords at a glance, read full conversation threads (Rich HTML & Plain Text), download attachments, compose new emails with CC/BCC/attachments, and send threaded replies.
 
 ---
 
@@ -10,12 +10,17 @@ A full-featured, fast Gmail client built with **Laravel 13**, **MySQL**, **Larav
   - Uses `laravel/socialite` with offline access (`access_type=offline`, `prompt=consent`) to obtain a refresh token.
   - Encrypts `access_token` and `refresh_token` at rest in MySQL using Laravel's `encrypted` model cast.
   - Automatically refreshes expired access tokens via `GmailService::getValidToken()`.
-- **High-Speed Inbox & Folders**
+- **High-Speed Inbox, Pagination & Background Auto-Sync**
   - Uses **Gmail Batch API (`createBatch()`)** to fetch up to 50 message metadata payloads in a single HTTP request.
+  - **Background Auto-Sync (25s AJAX Polling):** `inbox.blade.php` polls `?partial=1&refresh=1` every 25 seconds via `fetch()` to update the message list without reloading the page (automatically pauses when composing, tab is hidden, or viewing Page 2+).
   - 45-second versioned file cache for instant navigation, automatically invalidated on any mutation or manual refresh.
   - Supports **Inbox**, **Starred**, **Sent**, **Drafts**, **All Mail**, **Spam**, and **Trash** folders.
-  - Configurable pagination (`25`, `50`, or `100` messages per page) + `Next Page` token pagination.
+  - Configurable **25 / 50 / 100** emails per page with **Previous Page** and **Load Next Page** navigation (via session page-token stack).
   - Full Gmail search syntax support (`from:`, `subject:`, `has:attachment`, etc.).
+- **AI Keyword Extraction (OpenRouter / DeepSeek)**
+  - Uses **OpenRouter Unified API** (`deepseek/deepseek-chat`) via `AiKeywordService` to extract **2 to 6 main keywords** tailored to each email's content (short emails get 2–3, normal get 4, detailed get 5–6).
+  - Processes uncached emails progressively in batches of 8 via `POST /gmail/keywords` so the inbox renders instantly.
+  - Caches extracted keywords for **30 days** per message ID (`gmail:kw:v3:<id>`).
 - **Rich Email Viewer & Actions**
   - Full conversation **Thread View** (`users.threads.get`).
   - Toggle between sanitized **Rich HTML** (rendered inside a sandboxed `<iframe sandbox="allow-same-origin">`) and **Plain Text**.
@@ -38,7 +43,8 @@ A full-featured, fast Gmail client built with **Laravel 13**, **MySQL**, **Larav
 | Database | MySQL / MariaDB |
 | Auth / OAuth | `laravel/socialite` (`^5.33`) |
 | Gmail API | `google/apiclient` (`^2.20`) |
-| Frontend | Blade Templates + Tailwind CSS + Vanilla JS |
+| AI Keywords | OpenRouter API (`deepseek/deepseek-chat`) |
+| Frontend | Blade Templates + Tailwind CSS + Vanilla JS (`fetch` polling) |
 
 ---
 
@@ -48,6 +54,7 @@ A full-featured, fast Gmail client built with **Laravel 13**, **MySQL**, **Larav
 - **Composer**
 - **MySQL / MariaDB**
 - A **Google Cloud Console** project with the **Gmail API** enabled and an **OAuth 2.0 Web Application** client
+- An **OpenRouter** API key (for AI email keyword extraction)
 
 ---
 
@@ -70,7 +77,7 @@ cp .env.example .env
 php artisan key:generate
 ```
 
-Update `.env` with your MySQL database and Google OAuth credentials:
+Update `.env` with your MySQL database, Google OAuth, and OpenRouter credentials:
 ```env
 APP_URL=http://127.0.0.1:8000
 APP_TIMEZONE=Asia/Karachi
@@ -88,6 +95,11 @@ CACHE_STORE=file
 GOOGLE_CLIENT_ID=your-google-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-google-client-secret
 GOOGLE_REDIRECT_URI=http://127.0.0.1:8000/gmail/callback
+
+OPENROUTER_API_KEY=your-openrouter-api-key
+OPENROUTER_API_URL=https://openrouter.ai/api/v1/chat/completions
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_DEFAULT_MODEL=deepseek/deepseek-chat
 ```
 
 ### 4. Google Cloud Console Setup
@@ -136,7 +148,8 @@ Open `http://127.0.0.1:8000` in your browser and click **Connect with Google**.
 | `GET` | `/` | `GmailController@home` | Landing / workspace status page |
 | `GET` | `/gmail/connect` | `GmailController@redirect` | Redirect to Google OAuth consent |
 | `GET` | `/gmail/callback` | `GmailController@callback` | Handle OAuth callback & store tokens |
-| `GET` | `/gmail/inbox` | `GmailController@inbox` | Folder list, search & pagination |
+| `GET` | `/gmail/inbox` | `GmailController@inbox` | Folder list, search, pagination & partial sync |
+| `POST` | `/gmail/keywords` | `GmailController@keywords` | Batch AI keyword extraction (OpenRouter) |
 | `GET` | `/gmail/message/{id}` | `GmailController@show` | Full thread & message detail |
 | `GET` | `/gmail/message/{id}/attachment/{attachmentId}` | `GmailController@attachment` | Download attachment |
 | `POST` | `/gmail/compose` | `GmailController@compose` | Send new email (To/CC/BCC/files) |
@@ -155,18 +168,21 @@ Open `http://127.0.0.1:8000` in your browser and click **Connect with Google**.
 
 ```text
 app/
-├── Http/Controllers/GmailController.php   # OAuth, inbox, thread view, compose, reply, actions
+├── Http/Controllers/GmailController.php   # OAuth, inbox, keywords, thread view, compose, reply, actions
 ├── Models/GmailAccount.php                # Encrypted token casts
-└── Services/GmailService.php              # Batch API, token refresh, MIME builder, sanitizer
+└── Services/
+    ├── AiKeywordService.php               # OpenRouter batch 2-6 keyword extraction + 30d cache
+    └── GmailService.php                   # Batch API, token refresh, MIME builder, sanitizer
 config/
-└── services.php                           # Google OAuth configuration
+└── services.php                           # Google OAuth & OpenRouter configuration
 database/
 └── migrations/2026_11_25_000001_create_gmail_accounts_table.php
 resources/views/
 ├── layouts/app.blade.php                  # App shell, sidebar, search, compose modal
 └── gmail/
     ├── home.blade.php                     # Connect / status landing page
-    ├── inbox.blade.php                    # Message list & quick actions
+    ├── inbox.blade.php                    # Inbox toolbar, 25s AJAX auto-sync & AI keyword loader
+    ├── partials/message-list.blade.php    # Message rows, AI keyword pills, Prev/Next pagination
     └── show.blade.php                     # Thread conversation & reply/forward
 routes/
 └── web.php                                # Application routes

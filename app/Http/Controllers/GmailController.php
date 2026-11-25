@@ -3,8 +3,10 @@
 namespace App\Http\Controllers;
 
 use App\Models\GmailAccount;
+use App\Services\AiKeywordService;
 use App\Services\GmailService;
 use Google\Service\Exception as GoogleServiceException;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
@@ -88,7 +90,7 @@ class GmailController extends Controller
     /**
      * Display inbox / folder messages with search and pagination.
      */
-    public function inbox(Request $request, GmailService $gmailService): View|RedirectResponse
+    public function inbox(Request $request, GmailService $gmailService, AiKeywordService $aiKeywordService): View|RedirectResponse
     {
         $account = $this->resolveAccount();
         if (!$account) {
@@ -132,15 +134,71 @@ class GmailController extends Controller
                 ->with('error', 'Failed to load inbox: ' . $e->getMessage());
         }
 
-        return view('gmail.inbox', [
+        $messages = array_map(function (array $msg) use ($aiKeywordService) {
+            $msg['keywords'] = $aiKeywordService->getCached($msg['id']);
+
+            return $msg;
+        }, $result['messages']);
+
+        $currentToken = is_string($pageToken) ? $pageToken : '';
+        $stackKey = 'gmail_page_stack_' . md5($account->id . '|' . $label . '|' . $perPage . '|' . (string) $query);
+        $stack = session($stackKey, ['']);
+
+        if ($currentToken === '') {
+            $stack = [''];
+            $currentIndex = 0;
+        } else {
+            $foundIndex = array_search($currentToken, $stack, true);
+            if ($foundIndex !== false) {
+                $stack = array_slice($stack, 0, $foundIndex + 1);
+                $currentIndex = $foundIndex;
+            } else {
+                $stack[] = $currentToken;
+                $currentIndex = count($stack) - 1;
+            }
+        }
+        session([$stackKey => $stack]);
+
+        $hasPrev = $currentIndex > 0;
+        $prevPageToken = $hasPrev ? ($stack[$currentIndex - 1] ?: null) : null;
+
+        $viewData = [
             'account' => $account,
-            'messages' => $result['messages'],
+            'messages' => $messages,
             'nextPageToken' => $result['nextPageToken'],
+            'hasPrev' => $hasPrev,
+            'prevPageToken' => $prevPageToken,
+            'currentPage' => $currentIndex + 1,
             'resultSizeEstimate' => $result['resultSizeEstimate'],
             'activeLabel' => $label,
             'perPage' => $perPage,
+            'pageToken' => is_string($pageToken) ? $pageToken : null,
             'searchQuery' => is_string($query) ? $query : '',
+        ];
+
+        if ($request->boolean('partial')) {
+            return view('gmail.partials.message-list', $viewData);
+        }
+
+        return view('gmail.inbox', $viewData);
+    }
+
+    /**
+     * Extract 4 AI keywords for uncached emails in one batch OpenRouter call.
+     */
+    public function keywords(Request $request, AiKeywordService $aiKeywordService): JsonResponse
+    {
+        $validated = $request->validate([
+            'emails' => ['required', 'array', 'max:100'],
+            'emails.*.id' => ['required', 'string', 'max:120'],
+            'emails.*.from' => ['nullable', 'string', 'max:255'],
+            'emails.*.subject' => ['nullable', 'string', 'max:500'],
+            'emails.*.snippet' => ['nullable', 'string', 'max:1000'],
         ]);
+
+        $keywords = $aiKeywordService->extractBatch($validated['emails']);
+
+        return response()->json(['keywords' => $keywords]);
     }
 
     /**
